@@ -1,0 +1,132 @@
+# API contract — Stage 1
+
+Base URL in development: `http://127.0.0.1:8787`. The Vite frontend calls the same paths through its
+`/api` proxy. JSON endpoints use `application/json`; uploaded bytes use a raw request body. This document
+describes the current Stage 1 frontend contract, not every later-stage route in the backend.
+
+## Health and dashboard
+
+| Method and path | Purpose | Response |
+| --- | --- | --- |
+| `GET /api/health` | Backend and SQLite health | `{status, service, version, database, time}` |
+| `GET /api/dashboard` | Real SQLite counts, storage totals, recent projects, and provider summary | `{counts, storage, recent_projects, providers}` |
+| `GET /api/system/status` | Local runtime, Ollama, installed models, storage, and media tools | `{python_version, platform, cpu, memory, disk, tools, ollama, providers, free_only}` |
+
+## Projects
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/projects` | List projects; supports `type`, `brand_id`, `campaign_id`, and bounded `limit` filters. |
+| `POST /api/projects` | Create a project. The Stage 1 client sends `{name, brand_id, description}`; backend project types/status also have validated defaults. Returns the saved project. |
+| `GET /api/projects/{id}` | Read one project including its stored project data. |
+| `PUT /api/projects/{id}` | Update project name, description, status, optional brand/campaign links, or validated editor data. |
+| `DELETE /api/projects/{id}` | Delete a project record; does not delete user uploads or completed export files. |
+
+List responses have `{projects: Project[]}`. A project includes ID, type, name, brand ID/name, notes,
+status, and timestamps.
+
+## Brands
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/brands` | List saved brand profiles. |
+| `POST /api/brands` | Create a brand profile. The client sends name, industry, business description, products/services, audience, voice, website, and colors. Other stored profile fields have validated defaults. |
+| `GET /api/brands/{id}` | Read one saved profile. |
+| `PUT /api/brands/{id}` | Merge supplied profile fields with the existing profile, validate, and save. |
+| `DELETE /api/brands/{id}` | Delete the profile and preserve projects by clearing their brand link. |
+
+List responses have `{brands: Brand[]}`. Responses use the client field names `business_description`,
+`products_and_services`, `target_audience`, `brand_voice`, `brand_guidelines`, `colors`, and link/contact
+fields.
+
+## Local AI assistant
+
+`POST /api/ai/chat` accepts:
+
+```json
+{
+  "messages": [{"role": "user", "content": "Suggest a clear project next step."}],
+  "project_id": null,
+  "brand_id": null,
+  "selection": null,
+  "mode": "chat"
+}
+```
+
+Rules: at least one and at most 32 messages; each message is nonblank and at most 12,000 characters;
+total history is capped at 24,000 characters; the last message must be from the user; rewrite mode
+requires selected text. Supported modes are `chat`, `critique`, `ideas`, and `rewrite`.
+
+The backend loads optional project, brand and linked campaign context from SQLite. It calls the selected
+provider using the existing provider service. With local Ollama selected, only Ollama is attempted; an
+error does not trigger a cloud fallback. The response contains:
+
+```json
+{
+  "content": "...",
+  "provider": "ollama",
+  "model": "llama3.2:3b",
+  "local": true,
+  "processing": "local",
+  "duration_ms": 1234,
+  "prompt_tokens": null,
+  "completion_tokens": null,
+  "fallback_used": false,
+  "selected_provider": "ollama",
+  "chain": ["ollama"],
+  "attempts": [],
+  "context": {"project": null, "brand": null, "campaign": null},
+  "mode": "chat",
+  "free_only": true
+}
+```
+
+Actual model output and timing vary. Do not mock this response in acceptance testing.
+
+## Settings and provider status
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/settings` | Local settings and cloud-key configured booleans; never returns key values. |
+| `PUT /api/settings` | Save local Ollama URL/model and theme. `free_only` cannot be disabled. |
+| `POST /api/system/ollama/test` | Check a local Ollama URL and installed model list without generating text; never downloads a model. Remote URLs are rejected with HTTP 422 before any request. |
+| `GET /api/providers/chain` | Report the current free-only chain and readiness metadata. |
+
+The settings response contains `ollama_url`, `ollama_model`, provider model IDs/configured booleans,
+selected provider, priority, fallback setting, `free_only: true`, and theme. Secret values are not part
+of the response. Ollama URLs are restricted to loopback/local HTTP hosts.
+
+## Media
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/media` | List safe media metadata. |
+| `PUT /api/media` | Upload raw file bytes with `X-File-Name` URL-encoded header and content type. |
+| `GET /api/media/{id}/content` | Serve validated content for a media ID. |
+
+Uploads are size-limited and checked against supported extensions and file signatures. Storage names
+are generated by the backend. The raw media root is not publicly mounted.
+
+## Errors
+
+Expected API errors use a JSON response with a stable envelope:
+
+```json
+{
+  "detail": "Human-readable explanation",
+  "error": {"code": "provider_error_ollama", "message": "Human-readable explanation"}
+}
+```
+
+Validation `detail` can be an array of `{loc, msg, type}` objects. The frontend extracts `error.message`
+first, then a useful detail. Errors must not include secret values. A missing Ollama/model, invalid
+request, unavailable provider, or failed media operation must be shown without discarding the user’s
+prompt or stored project data.
+
+## Cost and compatibility invariants
+
+- `free_only` is always `true`.
+- Paid model IDs are rejected before dispatch.
+- Local Ollama selection never falls through to cloud.
+- No endpoint accepts arbitrary FFmpeg commands or shell text for execution.
+- The Stage 1 chat flow needs no cloud key and must be tested against a real installed model.
